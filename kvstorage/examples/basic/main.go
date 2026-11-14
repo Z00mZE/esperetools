@@ -30,17 +30,16 @@ func run() error {
 		if err != nil {
 			return errors.Wrap(err, "kvstorage.Open")
 		}
-		strings := kvstorage.Typed[string](s)
 		// Read first. A later boot must not overwrite settings with defaults.
-		name, found, err := strings.Get(tag)
+		name, found, err := s.Get[string](tag)
 		if err != nil {
-			return errors.Wrap(err, "kvstorage.GetString")
+			return errors.Wrap(err, "kvstorage.Get[string]")
 		}
 
 		n := tag + "//" + uuid.NewString()
 		println("tag", tag, "founded", found, "old", name, "new", n)
-		if err := strings.Set(tag, n); err != nil {
-			return errors.Wrap(err, "kvstorage.SetString")
+		if err := s.Set[string](tag, n); err != nil {
+			return errors.Wrap(err, "kvstorage.Set[string]")
 		}
 	}
 	println("Saved name. Disconnect power, reconnect, and run the monitor.")

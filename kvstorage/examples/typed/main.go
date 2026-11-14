@@ -23,42 +23,38 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	numbers := kvstorage.Typed[uint64](s)
-	boots, _, err := numbers.Get("boots")
+	boots, _, err := s.Get[uint64]("boots")
 	if err != nil {
 		return err
 	}
-	if err := numbers.Set("boots", boots+1); err != nil {
+	if err := s.Set[uint64]("boots", boots+1); err != nil {
 		return err
 	}
-	strings := kvstorage.Typed[string](s)
-	name, found, err := strings.Get("name")
+	name, found, err := s.Get[string]("name")
 	if err != nil {
 		return err
 	}
 	if !found {
 		name = "ESP32"
-		if err := strings.Set("name", name); err != nil {
+		if err := s.Set[string]("name", name); err != nil {
 			return err
 		}
 	}
-	flags := kvstorage.Typed[bool](s)
-	if err := flags.Set("enabled", true); err != nil {
+	if err := s.Set[bool]("enabled", true); err != nil {
 		return err
 	}
-	lists := kvstorage.Typed[[]uint16](s)
-	if _, found, err := lists.Get("ports"); err != nil {
+	if _, found, err := s.Get[[]uint16]("ports"); err != nil {
 		return err
 	} else if !found {
-		if err := lists.Set("ports", []uint16{80, 443}); err != nil {
+		if err := s.Set[[]uint16]("ports", []uint16{80, 443}); err != nil {
 			return err
 		}
 	}
-	ports, _, err := lists.Get("ports")
+	ports, _, err := s.Get[[]uint16]("ports")
 	if err != nil {
 		return err
 	}
-	enabled, _, err := flags.Get("enabled")
+	enabled, _, err := s.Get[bool]("enabled")
 	if err != nil {
 		return err
 	}

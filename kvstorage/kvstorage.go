@@ -367,10 +367,10 @@ func (s *Store) commit(values map[string][]byte) (err error) {
 
 func validKey(key string) bool { return len(key) > 0 && len(key) <= MaxKeySize }
 
-// Set persists raw bytes before returning. For serialized values of arbitrary
-// supported types, use Typed[T](s).Set. Keys are case-sensitive, 1..255 bytes.
+// SetBytes persists raw bytes before returning. For serialized values of
+// supported types, use Set[T]. Keys are case-sensitive, 1..255 bytes.
 // The caller can reuse value after Set returns. Identical writes are skipped.
-func (s *Store) Set(key string, value []byte) error {
+func (s *Store) SetBytes(key string, value []byte) error {
 	if !validKey(key) {
 		return ErrInvalidKey
 	}
@@ -394,9 +394,9 @@ func (s *Store) Set(key string, value []byte) error {
 	return s.commit(values)
 }
 
-// Get returns a copy and whether the key exists. A missing key returns
+// GetBytes returns raw bytes and whether the key exists. A missing key returns
 // nil, false, nil; a stored empty value returns an empty slice, true, nil.
-func (s *Store) Get(key string) ([]byte, bool, error) {
+func (s *Store) GetBytes(key string) ([]byte, bool, error) {
 	if !validKey(key) {
 		return nil, false, ErrInvalidKey
 	}
@@ -410,14 +410,6 @@ func (s *Store) Get(key string) ([]byte, bool, error) {
 		return nil, false, nil
 	}
 	return append([]byte{}, value...), true, nil
-}
-
-// SetString is a shorthand for Typed[string](s).Set.
-func (s *Store) SetString(key, value string) error { return Typed[string](s).Set(key, value) }
-
-// GetString is a shorthand for Typed[string](s).Get.
-func (s *Store) GetString(key string) (string, bool, error) {
-	return Typed[string](s).Get(key)
 }
 
 // Delete persists removal of a key. A missing key returns ErrNotFound.

@@ -6,36 +6,17 @@ import (
 	"reflect"
 )
 
-// Scalar lists persistent scalar types. Named types with these underlying
-// types are supported too. NaN and infinity cannot be represented by JSON.
-type Scalar interface {
-	~bool | ~string |
-		~int | ~int8 | ~int16 | ~int32 | ~int64 |
-		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 |
-		~float32 | ~float64
-}
-
 // Value supports scalars and slices of built-in scalar types. byte and rune
 // are aliases of uint8 and int32. Nested slices, pointers and structs are excluded.
 type Value interface {
-	Scalar |
+	~bool | ~string |
+		~int | ~int8 | ~int16 | ~int32 | ~int64 |
+		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 |
+		~float32 | ~float64 |
 		~[]bool | ~[]string |
 		~[]int | ~[]int8 | ~[]int16 | ~[]int32 | ~[]int64 |
 		~[]uint | ~[]uint8 | ~[]uint16 | ~[]uint32 | ~[]uint64 |
 		~[]float32 | ~[]float64
-}
-
-// TypedStore is a typed view of a shared Store. Views with different value
-// types can use the same Store and share its lock and committed flash snapshot.
-// Go declares type parameters on the receiver type, not on individual methods.
-type TypedStore[T Value] struct {
-	store *Store
-}
-
-// Typed creates a typed view without opening or copying storage. Pass the same
-// successfully opened Store to every view that accesses the same flash region.
-func Typed[T Value](store *Store) TypedStore[T] {
-	return TypedStore[T]{store: store}
 }
 
 // The envelope lives inside the existing byte-value format, so old snapshots
@@ -105,7 +86,7 @@ func valueKind[T Value]() byte {
 
 // Set serializes and persists a typed value. It does not modify storage if
 // serialization fails. Changing the type stored at an existing key is allowed.
-func (s TypedStore[T]) Set(key string, value T) error {
+func (s *Store) Set[T Value](key string, value T) error {
 	if !validKey(key) {
 		return ErrInvalidKey
 	}
@@ -117,16 +98,16 @@ func (s TypedStore[T]) Set(key string, value T) error {
 	copy(b, valueMagic[:])
 	b[len(valueMagic)] = valueKind[T]()
 	copy(b[len(valueMagic)+1:], data)
-	return s.store.Set(key, b)
+	return s.SetBytes(key, b)
 }
 
 // Get returns the typed value, its presence, and an error. A missing key
 // returns the zero value, false, nil. On an error it returns zero, false, err.
 // A different stored scalar type (including slice element type) returns
 // ErrTypeMismatch rather than silently converting or losing numeric precision.
-func (s TypedStore[T]) Get(key string) (T, bool, error) {
+func (s *Store) Get[T Value](key string) (T, bool, error) {
 	var value T
-	b, found, err := s.store.Get(key)
+	b, found, err := s.GetBytes(key)
 	if err != nil || !found {
 		return value, false, err
 	}

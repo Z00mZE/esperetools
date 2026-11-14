@@ -99,36 +99,36 @@ func TestValuesSurvivePowerCycle(t *testing.T) {
 	if f.mutations != 0 {
 		t.Fatal("opening blank flash wrote data")
 	}
-	must(t, s.SetString("ssid", "Домашняя сеть"))
+	must(t, s.Set[string]("ssid", "Домашняя сеть"))
 	source := []byte{0, 1, 255, 0}
-	must(t, s.Set("binary", source))
+	must(t, s.SetBytes("binary", source))
 	source[0] = 99
-	must(t, s.Set("empty", nil))
-	must(t, s.SetString("ключ", "значение"))
+	must(t, s.SetBytes("empty", nil))
+	must(t, s.Set[string]("ключ", "значение"))
 	// Drop all cached state to model turning power off, then back on.
 	s = openTest(t, f, 0, DefaultSize)
-	ssid, _, err := s.GetString("ssid")
+	ssid, _, err := s.Get[string]("ssid")
 	must(t, err)
 	if ssid != "Домашняя сеть" {
 		t.Fatal(ssid)
 	}
-	b, _, err := s.Get("binary")
+	b, _, err := s.GetBytes("binary")
 	must(t, err)
 	if !bytes.Equal(b, []byte{0, 1, 255, 0}) {
 		t.Fatal(b)
 	}
 	b[0] = 42
-	b, _, err = s.Get("binary")
+	b, _, err = s.GetBytes("binary")
 	must(t, err)
 	if b[0] != 0 {
 		t.Fatal("Get returned internal memory")
 	}
-	b, _, err = s.Get("empty")
+	b, _, err = s.GetBytes("empty")
 	must(t, err)
 	if len(b) != 0 {
 		t.Fatal(b)
 	}
-	v, _, err := s.GetString("ключ")
+	v, _, err := s.Get[string]("ключ")
 	must(t, err)
 	if v != "значение" {
 		t.Fatal(v)
@@ -143,11 +143,11 @@ func TestValuesSurvivePowerCycle(t *testing.T) {
 func TestUpdateDeleteClearAndNoOp(t *testing.T) {
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
-	must(t, s.SetString("a", "old"))
-	must(t, s.SetString("a", "new"))
-	must(t, s.SetString("b", "keep"))
+	must(t, s.Set[string]("a", "old"))
+	must(t, s.Set[string]("a", "new"))
+	must(t, s.Set[string]("b", "keep"))
 	n := f.mutations
-	must(t, s.SetString("a", "new"))
+	must(t, s.Set[string]("a", "new"))
 	if f.mutations != n {
 		t.Fatal("identical Set erased flash")
 	}
@@ -158,10 +158,10 @@ func TestUpdateDeleteClearAndNoOp(t *testing.T) {
 	}
 	must(t, s.Delete("a"))
 	s = openTest(t, f, 0, DefaultSize)
-	if _, found, err := s.Get("a"); err != nil || found {
+	if _, found, err := s.GetBytes("a"); err != nil || found {
 		t.Fatalf("found=%v, err=%v", found, err)
 	}
-	v, _, err := s.GetString("b")
+	v, _, err := s.Get[string]("b")
 	must(t, err)
 	if v != "keep" {
 		t.Fatal(v)
@@ -188,19 +188,19 @@ func TestCapacityAndInvalidKeysDoNotDamageData(t *testing.T) {
 	s := openTest(t, f, 0, DefaultSize)
 	// Four count bytes + six record bytes + one key byte = 11 bytes.
 	value := bytes.Repeat([]byte{42}, 4096-headerSize-11)
-	must(t, s.Set("k", value))
+	must(t, s.SetBytes("k", value))
 	n := f.mutations
-	if err := s.Set("k", append(value, 1)); err != ErrFull {
+	if err := s.SetBytes("k", append(value, 1)); err != ErrFull {
 		t.Fatal(err)
 	}
-	if err := s.SetString("extra", "x"); err != ErrFull {
+	if err := s.Set[string]("extra", "x"); err != ErrFull {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"", strings.Repeat("x", MaxKeySize+1)} {
-		if err := s.SetString(key, "x"); err != ErrInvalidKey {
+		if err := s.Set[string](key, "x"); err != ErrInvalidKey {
 			t.Fatal(err)
 		}
-		if _, _, err := s.Get(key); err != ErrInvalidKey {
+		if _, _, err := s.GetBytes(key); err != ErrInvalidKey {
 			t.Fatal(err)
 		}
 		if err := s.Delete(key); err != ErrInvalidKey {
@@ -211,13 +211,13 @@ func TestCapacityAndInvalidKeysDoNotDamageData(t *testing.T) {
 		t.Fatal("invalid mutation erased flash")
 	}
 	s = openTest(t, f, 0, DefaultSize)
-	got, _, err := s.Get("k")
+	got, _, err := s.GetBytes("k")
 	must(t, err)
 	if !bytes.Equal(got, value) {
 		t.Fatal("full store lost value")
 	}
 	must(t, s.Delete("k"))
-	must(t, s.SetString("extra", "fits now"))
+	must(t, s.Set[string]("extra", "fits now"))
 }
 
 func TestRegionAndLargerBanks(t *testing.T) {
@@ -228,10 +228,10 @@ func TestRegionAndLargerBanks(t *testing.T) {
 	value := bytes.Repeat([]byte{123}, 7000)
 	for i := 0; i < 8; i++ {
 		value[0] = byte(i)
-		must(t, s.Set("large", value))
+		must(t, s.SetBytes("large", value))
 	}
 	s = openTest(t, f, 4096, 4*4096)
-	got, _, err := s.Get("large")
+	got, _, err := s.GetBytes("large")
 	must(t, err)
 	if !bytes.Equal(got, value) {
 		t.Fatal("large value changed")
@@ -254,11 +254,11 @@ func TestCorruptionRecoveryAndExplicitFormat(t *testing.T) {
 		t.Run(fmt.Sprint(damage), func(t *testing.T) {
 			f := newFlash(4)
 			s := openTest(t, f, 4096, DefaultSize)
-			must(t, s.SetString("key", "old"))
-			must(t, s.SetString("key", "new"))
+			must(t, s.Set[string]("key", "old"))
+			must(t, s.Set[string]("key", "new"))
 			f.data[4096+s.active*4096+damage] ^= 1
 			s = openTest(t, f, 4096, DefaultSize)
-			v, _, err := s.GetString("key")
+			v, _, err := s.Get[string]("key")
 			must(t, err)
 			if v != "old" {
 				t.Fatal("did not recover previous snapshot", v)
@@ -267,8 +267,8 @@ func TestCorruptionRecoveryAndExplicitFormat(t *testing.T) {
 	}
 	f := newFlash(4)
 	s := openTest(t, f, 4096, DefaultSize)
-	must(t, s.SetString("key", "old"))
-	must(t, s.SetString("key", "new"))
+	must(t, s.Set[string]("key", "old"))
+	must(t, s.Set[string]("key", "new"))
 	f.data[4096+24] ^= 1
 	f.data[8192+24] ^= 1
 	before := bytes.Clone(f.data)
@@ -283,9 +283,9 @@ func TestCorruptionRecoveryAndExplicitFormat(t *testing.T) {
 	if !bytes.Equal(f.data[:4096], before[:4096]) || !bytes.Equal(f.data[12288:], before[12288:]) {
 		t.Fatal("Format erased other regions")
 	}
-	must(t, s.SetString("key", "fresh"))
+	must(t, s.Set[string]("key", "fresh"))
 	s = openTest(t, f, 4096, DefaultSize)
-	v, _, err := s.GetString("key")
+	v, _, err := s.Get[string]("key")
 	must(t, err)
 	if v != "fresh" {
 		t.Fatal(v)
@@ -299,29 +299,29 @@ func TestFirstUseOfUnformattedRegion(t *testing.T) {
 			copy(f.data[4096:12288], bytes.Repeat([]byte{fill}, 8192))
 			before := bytes.Clone(f.data)
 			s := openTest(t, f, 4096, DefaultSize)
-			if _, found, err := s.Get("key"); err != nil || found {
+			if _, found, err := s.GetBytes("key"); err != nil || found {
 				t.Fatalf("found=%v, err=%v", found, err)
 			}
 			if f.mutations != 0 {
 				t.Fatal("Open must initialize lazily, on first write")
 			}
-			must(t, s.SetString("key", "first"))
+			must(t, s.Set[string]("key", "first"))
 			s = openTest(t, f, 4096, DefaultSize)
-			v, _, err := s.GetString("key")
+			v, _, err := s.Get[string]("key")
 			must(t, err)
 			if v != "first" {
 				t.Fatal(v)
 			}
-			must(t, s.SetString("key", "replacement"))
+			must(t, s.Set[string]("key", "replacement"))
 			s = openTest(t, f, 4096, DefaultSize)
-			v, _, err = s.GetString("key")
+			v, _, err = s.Get[string]("key")
 			must(t, err)
 			if v != "replacement" {
 				t.Fatal(v)
 			}
 			must(t, s.Delete("key"))
 			s = openTest(t, f, 4096, DefaultSize)
-			if _, found, err := s.Get("key"); err != nil || found {
+			if _, found, err := s.GetBytes("key"); err != nil || found {
 				t.Fatalf("found=%v, err=%v", found, err)
 			}
 			if !bytes.Equal(f.data[:4096], before[:4096]) || !bytes.Equal(f.data[12288:], before[12288:]) {
@@ -336,7 +336,7 @@ func TestDamagedCommittedSnapshotIsNotFirstUse(t *testing.T) {
 		t.Run(fmt.Sprint(damage), func(t *testing.T) {
 			f := newFlash(2)
 			s := openTest(t, f, 0, DefaultSize)
-			must(t, s.SetString("key", "saved"))
+			must(t, s.Set[string]("key", "saved"))
 			// Clear a set marker bit, or flip a data/header bit.
 			f.data[damage] ^= 1
 			before := bytes.Clone(f.data)
@@ -353,7 +353,7 @@ func TestDamagedCommittedSnapshotIsNotFirstUse(t *testing.T) {
 func TestUnsupportedVersionNeverAutoFormats(t *testing.T) {
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
-	must(t, s.SetString("key", "x"))
+	must(t, s.Set[string]("key", "x"))
 	binary.LittleEndian.PutUint32(f.data[8:], 2)
 	binary.LittleEndian.PutUint32(f.data[28:], crc32.ChecksumIEEE(f.data[:28]))
 	before := bytes.Clone(f.data)
@@ -371,7 +371,7 @@ func snapshot(t *testing.T, s *Store) map[string]string {
 	must(t, err)
 	result := make(map[string]string)
 	for _, k := range keys {
-		v, _, err := s.GetString(k)
+		v, _, err := s.Get[string](k)
 		must(t, err)
 		result[k] = v
 	}
@@ -387,8 +387,8 @@ func TestPowerLossDuringEveryMutation(t *testing.T) {
 			}
 			s := openTest(t, base, 0, DefaultSize)
 			if scenario != "first" && scenario != "first-unformatted" {
-				must(t, s.SetString("guard", "keep"))
-				must(t, s.SetString("value", strings.Repeat("o", 500)))
+				must(t, s.Set[string]("guard", "keep"))
+				must(t, s.Set[string]("value", strings.Repeat("o", 500)))
 				// Both banks now contain a committed snapshot; the next write
 				// must survive a partial erase of the inactive older bank.
 			}
@@ -401,7 +401,7 @@ func TestPowerLossDuringEveryMutation(t *testing.T) {
 				case "clear":
 					return s.Clear()
 				default:
-					return s.SetString("value", strings.Repeat("n", 700))
+					return s.Set[string]("value", strings.Repeat("n", 700))
 				}
 			}
 			probe := &memoryFlash{data: bytes.Clone(data), failAt: -1}
@@ -417,10 +417,10 @@ func TestPowerLossDuringEveryMutation(t *testing.T) {
 						if err := action(handle); !errors.Is(err, errPowerLoss) {
 							t.Fatal(err)
 						}
-						if _, _, err := handle.Get("value"); err != ErrNeedsReopen {
+						if _, _, err := handle.GetBytes("value"); err != ErrNeedsReopen {
 							t.Fatal(err)
 						}
-						if err := handle.SetString("other", "x"); err != ErrNeedsReopen {
+						if err := handle.Set[string]("other", "x"); err != ErrNeedsReopen {
 							t.Fatal(err)
 						}
 						f.failAt = -1
@@ -431,9 +431,9 @@ func TestPowerLossDuringEveryMutation(t *testing.T) {
 						if !reflect.DeepEqual(got, old) && !reflect.DeepEqual(got, want) {
 							t.Fatal("mixed snapshot", got)
 						}
-						must(t, rebooted.SetString("after", "recovered"))
+						must(t, rebooted.Set[string]("after", "recovered"))
 						rebooted = openTest(t, f, 0, DefaultSize)
-						v, _, err := rebooted.GetString("after")
+						v, _, err := rebooted.Get[string]("after")
 						must(t, err)
 						if v != "recovered" {
 							t.Fatal(v)
@@ -463,17 +463,17 @@ func (f *verifyFailureFlash) WriteAt(b []byte, off int64) (int, error) {
 func TestVerificationFailureRequiresReopen(t *testing.T) {
 	f := &verifyFailureFlash{memoryFlash: newFlash(2)}
 	s := openTest(t, f, 0, DefaultSize)
-	must(t, s.SetString("key", "old"))
+	must(t, s.Set[string]("key", "old"))
 	f.fail = true
-	if err := s.SetString("key", "new"); err != io.ErrUnexpectedEOF {
+	if err := s.Set[string]("key", "new"); err != io.ErrUnexpectedEOF {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Get("key"); err != ErrNeedsReopen {
+	if _, _, err := s.GetBytes("key"); err != ErrNeedsReopen {
 		t.Fatal(err)
 	}
 	f.fail, f.failVerify = false, false
 	s = openTest(t, f, 0, DefaultSize)
-	v, _, err := s.GetString("key")
+	v, _, err := s.Get[string]("key")
 	must(t, err)
 	if v != "new" {
 		t.Fatal(v)
@@ -490,11 +490,11 @@ func TestConcurrentUse(t *testing.T) {
 			defer wg.Done()
 			key := fmt.Sprint(i)
 			for n := 0; n < 30; n++ {
-				if err := s.SetString(key, fmt.Sprint(n)); err != nil {
+				if err := s.Set[string](key, fmt.Sprint(n)); err != nil {
 					t.Error(err)
 					return
 				}
-				if _, _, err := s.Get(key); err != nil {
+				if _, _, err := s.GetBytes(key); err != nil {
 					t.Error(err)
 					return
 				}
@@ -504,7 +504,7 @@ func TestConcurrentUse(t *testing.T) {
 	wg.Wait()
 	s = openTest(t, f, 0, DefaultSize)
 	for i := 0; i < 4; i++ {
-		v, _, err := s.GetString(fmt.Sprint(i))
+		v, _, err := s.Get[string](fmt.Sprint(i))
 		must(t, err)
 		if v != "29" {
 			t.Fatal(v)
@@ -515,38 +515,38 @@ func TestConcurrentUse(t *testing.T) {
 func TestGetterFoundAndErrors(t *testing.T) {
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
-	if v, found, err := s.Get("missing"); v != nil || found || err != nil {
+	if v, found, err := s.GetBytes("missing"); v != nil || found || err != nil {
 		t.Fatalf("%v %v %v", v, found, err)
 	}
-	if v, found, err := s.GetString("missing"); v != "" || found || err != nil {
+	if v, found, err := s.Get[string]("missing"); v != "" || found || err != nil {
 		t.Fatalf("%q %v %v", v, found, err)
 	}
-	must(t, s.Set("empty", nil))
-	must(t, s.SetString("name", "ESP32"))
+	must(t, s.SetBytes("empty", nil))
+	must(t, s.Set[string]("name", "ESP32"))
 	s = openTest(t, f, 0, DefaultSize)
-	if v, found, err := s.Get("empty"); len(v) != 0 || !found || err != nil {
+	if v, found, err := s.GetBytes("empty"); len(v) != 0 || !found || err != nil {
 		t.Fatalf("%v %v %v", v, found, err)
 	}
-	if v, found, err := s.GetString("empty"); v != "" || !found || err != nil {
+	if v, found, err := s.Get[string]("empty"); v != "" || !found || err != nil {
 		t.Fatalf("%q %v %v", v, found, err)
 	}
-	if v, found, err := s.GetString("name"); v != "ESP32" || !found || err != nil {
+	if v, found, err := s.Get[string]("name"); v != "ESP32" || !found || err != nil {
 		t.Fatalf("%q %v %v", v, found, err)
 	}
-	if v, found, err := s.Get(""); v != nil || found || err != ErrInvalidKey {
+	if v, found, err := s.GetBytes(""); v != nil || found || err != ErrInvalidKey {
 		t.Fatalf("%v %v %v", v, found, err)
 	}
-	if v, found, err := s.GetString(""); v != "" || found || err != ErrInvalidKey {
+	if v, found, err := s.Get[string](""); v != "" || found || err != ErrInvalidKey {
 		t.Fatalf("%q %v %v", v, found, err)
 	}
 	f.failAt = f.mutations
-	if err := s.SetString("name", "new"); err != errPowerLoss {
+	if err := s.Set[string]("name", "new"); err != errPowerLoss {
 		t.Fatal(err)
 	}
-	if v, found, err := s.Get("name"); v != nil || found || err != ErrNeedsReopen {
+	if v, found, err := s.GetBytes("name"); v != nil || found || err != ErrNeedsReopen {
 		t.Fatalf("%v %v %v", v, found, err)
 	}
-	if v, found, err := s.GetString("name"); v != "" || found || err != ErrNeedsReopen {
+	if v, found, err := s.Get[string]("name"); v != "" || found || err != ErrNeedsReopen {
 		t.Fatalf("%q %v %v", v, found, err)
 	}
 }
