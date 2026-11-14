@@ -15,21 +15,21 @@ func typedRoundTrip[T Value](t *testing.T, value T) {
 	t.Helper()
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
-	typed := Typed[T](s)
-	must(t, typed.Set("value", value))
+	typed := s
+	must(t, typed.Set[T]("value", value))
 	writes := f.mutations
-	must(t, typed.Set("value", value))
+	must(t, typed.Set[T]("value", value))
 	if f.mutations != writes {
 		t.Fatal("same typed value rewrote flash")
 	}
-	typed = Typed[T](openTest(t, f, 0, DefaultSize))
-	got, found, err := typed.Get("value")
+	typed = openTest(t, f, 0, DefaultSize)
+	got, found, err := typed.Get[T]("value")
 	must(t, err)
 	if !found || !reflect.DeepEqual(got, value) {
 		t.Fatalf("got %#v, found %v; want %#v", got, found, value)
 	}
 	var zero T
-	got, found, err = typed.Get("absent")
+	got, found, err = typed.Get[T]("absent")
 	if err != nil || found || !reflect.DeepEqual(got, zero) {
 		t.Fatalf("missing: %#v %v %v", got, found, err)
 	}
@@ -75,51 +75,51 @@ func TestTypedScalarsAndSlices(t *testing.T) {
 	typedRoundTrip(t, names{"one", "two"})
 }
 
-func TestTypedViewsShareStoreAndPreserveOtherKeys(t *testing.T) {
+func TestGenericMethodsShareStoreAndPreserveOtherKeys(t *testing.T) {
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
-	must(t, Typed[string](s).Set("name", "ESP32"))
-	must(t, Typed[int](s).Set("count", 42))
-	must(t, Typed[bool](s).Set("enabled", true))
+	must(t, s.Set[string]("name", "ESP32"))
+	must(t, s.Set[int]("count", 42))
+	must(t, s.Set[bool]("enabled", true))
 	input := []uint16{80, 443}
-	must(t, Typed[[]uint16](s).Set("ports", input))
+	must(t, s.Set[[]uint16]("ports", input))
 	input[0] = 1
 	s = openTest(t, f, 0, DefaultSize)
-	name, found, err := Typed[string](s).Get("name")
+	name, found, err := s.Get[string]("name")
 	must(t, err)
 	if !found || name != "ESP32" {
 		t.Fatal(name, found)
 	}
-	count, found, err := Typed[int](s).Get("count")
+	count, found, err := s.Get[int]("count")
 	must(t, err)
 	if !found || count != 42 {
 		t.Fatal(count, found)
 	}
-	enabled, found, err := Typed[bool](s).Get("enabled")
+	enabled, found, err := s.Get[bool]("enabled")
 	must(t, err)
 	if !found || !enabled {
 		t.Fatal(enabled, found)
 	}
-	ports, found, err := Typed[[]uint16](s).Get("ports")
+	ports, found, err := s.Get[[]uint16]("ports")
 	must(t, err)
 	if !found || !reflect.DeepEqual(ports, []uint16{80, 443}) {
 		t.Fatal(ports, found)
 	}
 	ports[0] = 1
-	ports, _, err = Typed[[]uint16](s).Get("ports")
+	ports, _, err = s.Get[[]uint16]("ports")
 	must(t, err)
 	if ports[0] != 80 {
 		t.Fatal("returned slice aliases stored value")
 	}
-	must(t, Typed[int](s).Set("count", 43))
+	must(t, s.Set[int]("count", 43))
 	must(t, s.Delete("enabled"))
 	s = openTest(t, f, 0, DefaultSize)
-	count, found, err = Typed[int](s).Get("count")
+	count, found, err = s.Get[int]("count")
 	must(t, err)
 	if !found || count != 43 {
 		t.Fatal(count, found)
 	}
-	if _, found, err := Typed[bool](s).Get("enabled"); found || err != nil {
+	if _, found, err := s.Get[bool]("enabled"); found || err != nil {
 		t.Fatal(found, err)
 	}
 }
@@ -127,63 +127,63 @@ func TestTypedViewsShareStoreAndPreserveOtherKeys(t *testing.T) {
 func TestTypedErrorsDoNotModifyStorage(t *testing.T) {
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
-	must(t, Typed[int](s).Set("number", 42))
+	must(t, s.Set[int]("number", 42))
 	before := bytes.Clone(f.data)
-	if v, found, err := Typed[string](s).Get("number"); v != "" || found || !errors.Is(err, ErrTypeMismatch) {
+	if v, found, err := s.Get[string]("number"); v != "" || found || !errors.Is(err, ErrTypeMismatch) {
 		t.Fatal(v, found, err)
 	}
-	if err := Typed[float64](s).Set("number", math.NaN()); err == nil {
+	if err := s.Set[float64]("number", math.NaN()); err == nil {
 		t.Fatal("NaN must fail serialization")
 	}
-	if err := Typed[float64](s).Set("number", math.Inf(1)); err == nil {
+	if err := s.Set[float64]("number", math.Inf(1)); err == nil {
 		t.Fatal("infinity must fail serialization")
 	}
 	if !bytes.Equal(before, f.data) {
 		t.Fatal("type or serialization error modified flash")
 	}
-	if _, found, err := Typed[int](s).Get(""); found || err != ErrInvalidKey {
+	if _, found, err := s.Get[int](""); found || err != ErrInvalidKey {
 		t.Fatal(found, err)
 	}
-	if err := Typed[int](s).Set("", 1); err != ErrInvalidKey {
+	if err := s.Set[int]("", 1); err != ErrInvalidKey {
 		t.Fatal(err)
 	}
 	// A new type at an existing key must replace the tag too.
-	must(t, Typed[bool](s).Set("number", false))
+	must(t, s.Set[bool]("number", false))
 	s = openTest(t, f, 0, DefaultSize)
-	if _, found, err := Typed[int](s).Get("number"); found || err != ErrTypeMismatch {
+	if _, found, err := s.Get[int]("number"); found || err != ErrTypeMismatch {
 		t.Fatal(found, err)
 	}
-	if v, found, err := Typed[bool](s).Get("number"); v || !found || err != nil {
+	if v, found, err := s.Get[bool]("number"); v || !found || err != nil {
 		t.Fatal(v, found, err)
 	}
 }
 
-func TestTypedLegacyValuesAndStringHelpers(t *testing.T) {
+func TestGenericLegacyValuesAndOverwrite(t *testing.T) {
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
-	must(t, s.Set("old", []byte("saved before serialization")))
+	must(t, s.SetBytes("old", []byte("saved before serialization")))
 	s = openTest(t, f, 0, DefaultSize)
-	v, found, err := Typed[string](s).Get("old")
+	v, found, err := s.Get[string]("old")
 	must(t, err)
 	if !found || v != "saved before serialization" {
 		t.Fatal(v, found)
 	}
-	b, found, err := Typed[[]byte](s).Get("old")
+	b, found, err := s.Get[[]byte]("old")
 	must(t, err)
 	if !found || string(b) != v {
 		t.Fatal(b, found)
 	}
-	if _, found, err := Typed[int](s).Get("old"); found || err != ErrTypeMismatch {
+	if _, found, err := s.Get[int]("old"); found || err != ErrTypeMismatch {
 		t.Fatal(found, err)
 	}
-	must(t, s.SetString("new", "helper"))
-	v, found, err = Typed[string](s).Get("new")
+	must(t, s.Set[string]("new", "helper"))
+	v, found, err = s.Get[string]("new")
 	must(t, err)
 	if !found || v != "helper" {
 		t.Fatal(v, found)
 	}
-	must(t, Typed[string](s).Set("new", "typed"))
-	v, found, err = s.GetString("new")
+	must(t, s.Set[string]("new", "typed"))
+	v, found, err = s.Get[string]("new")
 	must(t, err)
 	if !found || v != "typed" {
 		t.Fatal(v, found)

@@ -13,23 +13,19 @@ if err != nil {
 	return err
 }
 
-// Все представления используют один экземпляр storage и одну область flash.
-strings := kvstorage.Typed[string](storage)
-numbers := kvstorage.Typed[int](storage)
-flags := kvstorage.Typed[bool](storage)
-lists := kvstorage.Typed[[]uint16](storage)
+// Один Store хранит значения разных типов.
 
-if err := strings.Set("ssid", "Home Wi-Fi"); err != nil {
+if err := storage.Set[string]("ssid", "Home Wi-Fi"); err != nil {
 	return err
 }
-if err := numbers.Set("timeout_ms", 5000); err != nil { return err }
-if err := flags.Set("enabled", true); err != nil { return err }
-if err := lists.Set("ports", []uint16{80, 443}); err != nil { return err }
+if err := storage.Set[int]("timeout_ms", 5000); err != nil { return err }
+if err := storage.Set[bool]("enabled", true); err != nil { return err }
+if err := storage.Set[[]uint16]("ports", []uint16{80, 443}); err != nil { return err }
 
-// После выключения и включения платы снова вызовите Open и создайте Typed[T].
-ssid, found, err := strings.Get("ssid")
-timeout, found, err := numbers.Get("timeout_ms")
-ports, found, err := lists.Get("ports")
+// После выключения и включения платы снова вызовите Open.
+ssid, found, err := storage.Get[string]("ssid")
+timeout, found, err := storage.Get[int]("timeout_ms")
+ports, found, err := storage.Get[[]uint16]("ports")
 ```
 
 Фрагмент предназначен для функции, возвращающей `error`. Полная программа:
@@ -63,9 +59,8 @@ tinygo monitor -target=esp32s3-generic -serial=usb -port=COM6
 | Метод | Назначение |
 | --- | --- |
 | `Open() (*Store, error)` | Открыть стандартную область flash на ESP32-C3/S3 |
-| `Typed[T Value](storage *Store) TypedStore[T]` | Создать типизированное представление общего хранилища |
-| `TypedStore[T].Set(key string, value T) error` | Сериализовать и сохранить значение |
-| `TypedStore[T].Get(key string) (T, bool, error)` | Прочитать значение нужного типа и признак наличия |
+| `Store.Set[T Value](key string, value T) error` | Сериализовать и сохранить значение |
+| `Store.Get[T Value](key string) (T, bool, error)` | Прочитать значение нужного типа и признак наличия |
 | `Delete(key string) error` | Сохранить удаление ключа |
 | `Has(key string) (bool, error)` | Проверить наличие ключа |
 | `Keys() ([]string, error)` | Получить ключи по алфавиту |
@@ -77,11 +72,20 @@ tinygo monitor -target=esp32s3-generic -serial=usb -port=COM6
 включая `[]byte`, и именованные типы с соответствующим базовым типом.
 Указатели, структуры, map, complex, uintptr и вложенные слайсы не входят в `Value`.
 
-В Go параметр типа объявляется у типа-получателя, а не у отдельного метода.
-Поэтому `TypedStore[T]` предоставляет методы `Set` и `Get` с параметром `T`.
-Представление не открывает flash повторно и не копирует хранилище.
+Используются методы с собственными параметрами типа, доступные с Go 1.27:
+`storage.Set[int]("count", 42)` и `storage.Get[int]("count")`.
+Сам `Store` не является generic-типом. Все методы работают с одним экземпляром
+хранилища. Проверены Go 1.27.3 и TinyGo 0.44.0.
 
-Сериализация выполняется внутри компонента через JSON. Вместе со значением
+Сериализация выполняется внутри компонента через JSON. Например, `int(42)`
+кодируется байтами текста `42`, `bool(true)` — `true`, а `[]int{1, 2}` — `[1,2]`.
+Строки кодируются с JSON-кавычками и экранированием, `[]byte` — строкой base64.
+Это текстовое представление значения внутри бинарного снимка, без сжатия.
+
+Перед JSON расположены 8 байт сигнатуры/версии и 1 байт кода типа. В бинарном
+снимке для каждой записи также сохраняются длины ключа и значения и сам ключ.
+При `Get[T]` проверяется код типа, затем JSON декодируется непосредственно в `T`.
+Вместе со значением
 сохраняются версия сериализации и код типа. Чтение с другим типом возвращает
 `ErrTypeMismatch`; числа не преобразуются через `float64`, поэтому `int64` и
 `uint64` сохраняются точно, включая предельные значения. `NaN` и бесконечности
@@ -92,10 +96,9 @@ tinygo monitor -target=esp32s3-generic -serial=usb -port=COM6
 При ошибке возвращается нулевое значение, `found=false`, `err!=nil`.
 `Delete` отсутствующего ключа возвращает `ErrNotFound`.
 
-Низкоуровневые `Store.Set/Get` по-прежнему работают с сырыми `[]byte`.
-`SetString/GetString` оставлены как сокращение для `Typed[string]`.
-Старые строки и байтовые значения без сериализации читаются через представления
-`Typed[string]` и `Typed[[]byte]`; их прежний числовой тип определить невозможно.
+Низкоуровневые `Store.SetBytes/GetBytes` работают с сырыми `[]byte`.
+Старые строки и байтовые значения без сериализации читаются через
+`Get[string]` и `Get[[]byte]`; их прежний числовой тип определить невозможно.
 Новая разметка flash и стирание старого хранилища для перехода не требуются.
 
 `Set`, `Delete` и `Clear` сохраняют результат сразу: отдельного `Commit` или
