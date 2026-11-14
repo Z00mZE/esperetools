@@ -14,7 +14,7 @@ import "github.com/Z00mZE/esperetools/kvstorage"
 Готовый пример для ESP32-S3:
 
 ```sh
-GOFLAGS=-buildvcs=false tinygo flash -monitor -target=esp32s3-generic -serial=usb -port=COM6 ./kvstorage/examples/typed
+GOFLAGS=-buildvcs=false tinygo flash -monitor -target=esp32s3-generic -serial=usb -port=COM6 ./kvstorage/examples/basic
 ```
 
 Или `task flash-and-monitor`, если установлен Task. Команда использует `COM6`;

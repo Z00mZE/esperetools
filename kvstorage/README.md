@@ -29,16 +29,16 @@ ports, found, err := storage.Get[[]uint16]("ports")
 ```
 
 Фрагмент предназначен для функции, возвращающей `error`. Полная программа:
-[`examples/typed/main.go`](examples/typed/main.go). Она хранит строки, числа,
+[`examples/basic/main.go`](examples/basic/main.go). Она хранит строки, числа,
 булевы значения и слайсы в одной области. Счётчик запусков увеличивается при
 каждом старте; имя и список портов создаются при первом запуске.
 
 ```sh
 # Проверка сборки без прошивки платы
-GOFLAGS=-buildvcs=false tinygo build -target=esp32s3-generic -serial=usb -o kvstorage.elf ./kvstorage/examples/typed
+GOFLAGS=-buildvcs=false tinygo build -target=esp32s3-generic -serial=usb -o kvstorage.elf ./kvstorage/examples/basic
 
 # Прошивка примера и запуск монитора
-GOFLAGS=-buildvcs=false tinygo flash -monitor -target=esp32s3-generic -serial=usb -port=COM6 ./kvstorage/examples/typed
+GOFLAGS=-buildvcs=false tinygo flash -monitor -target=esp32s3-generic -serial=usb -port=COM6 ./kvstorage/examples/basic
 ```
 
 После сообщения `name: ESP32 boot: 1 ...` завершите монитор через Ctrl+C, отключите
@@ -85,8 +85,7 @@ tinygo monitor -target=esp32s3-generic -serial=usb -port=COM6
 Перед JSON расположены 8 байт сигнатуры/версии и 1 байт кода типа. В бинарном
 снимке для каждой записи также сохраняются длины ключа и значения и сам ключ.
 При `Get[T]` проверяется код типа, затем JSON декодируется непосредственно в `T`.
-Вместе со значением
-сохраняются версия сериализации и код типа. Чтение с другим типом возвращает
+Чтение с другим типом возвращает
 `ErrTypeMismatch`; числа не преобразуются через `float64`, поэтому `int64` и
 `uint64` сохраняются точно, включая предельные значения. `NaN` и бесконечности
 возвращают ошибку сериализации, не изменяя flash.
@@ -96,7 +95,6 @@ tinygo monitor -target=esp32s3-generic -serial=usb -port=COM6
 При ошибке возвращается нулевое значение, `found=false`, `err!=nil`.
 `Delete` отсутствующего ключа возвращает `ErrNotFound`.
 
-Низкоуровневые `Store.SetBytes/GetBytes` работают с сырыми `[]byte`.
 Старые строки и байтовые значения без сериализации читаются через
 `Get[string]` и `Get[[]byte]`; их прежний числовой тип определить невозможно.
 Новая разметка flash и стирание старого хранилища для перехода не требуются.

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"math"
 )
 
 var errPowerLoss = errors.New("power lost")
@@ -93,7 +94,21 @@ func openTest(t *testing.T, f Flash, offset, size int64) *Store {
 	return s
 }
 
+func snapshot(t *testing.T, s *Store) map[string]string {
+	t.Helper()
+	keys, err := s.Keys()
+	must(t, err)
+	result := make(map[string]string)
+	for _, k := range keys {
+		v, _, err := s.Get[string](k)
+		must(t, err)
+		result[k] = v
+	}
+	return result
+}
+
 func TestValuesSurvivePowerCycle(t *testing.T) {
+	t.Parallel()
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
 	if f.mutations != 0 {
@@ -101,9 +116,9 @@ func TestValuesSurvivePowerCycle(t *testing.T) {
 	}
 	must(t, s.Set[string]("ssid", "Домашняя сеть"))
 	source := []byte{0, 1, 255, 0}
-	must(t, s.SetBytes("binary", source))
+	must(t, s.setBytes("binary", source))
 	source[0] = 99
-	must(t, s.SetBytes("empty", nil))
+	must(t, s.setBytes("empty", nil))
 	must(t, s.Set[string]("ключ", "значение"))
 	// Drop all cached state to model turning power off, then back on.
 	s = openTest(t, f, 0, DefaultSize)
@@ -112,18 +127,18 @@ func TestValuesSurvivePowerCycle(t *testing.T) {
 	if ssid != "Домашняя сеть" {
 		t.Fatal(ssid)
 	}
-	b, _, err := s.GetBytes("binary")
+	b, _, err := s.getBytes("binary")
 	must(t, err)
 	if !bytes.Equal(b, []byte{0, 1, 255, 0}) {
 		t.Fatal(b)
 	}
 	b[0] = 42
-	b, _, err = s.GetBytes("binary")
+	b, _, err = s.getBytes("binary")
 	must(t, err)
 	if b[0] != 0 {
 		t.Fatal("Get returned internal memory")
 	}
-	b, _, err = s.GetBytes("empty")
+	b, _, err = s.getBytes("empty")
 	must(t, err)
 	if len(b) != 0 {
 		t.Fatal(b)
@@ -141,6 +156,7 @@ func TestValuesSurvivePowerCycle(t *testing.T) {
 }
 
 func TestUpdateDeleteClearAndNoOp(t *testing.T) {
+	t.Parallel()
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
 	must(t, s.Set[string]("a", "old"))
@@ -158,7 +174,7 @@ func TestUpdateDeleteClearAndNoOp(t *testing.T) {
 	}
 	must(t, s.Delete("a"))
 	s = openTest(t, f, 0, DefaultSize)
-	if _, found, err := s.GetBytes("a"); err != nil || found {
+	if _, found, err := s.getBytes("a"); err != nil || found {
 		t.Fatalf("found=%v, err=%v", found, err)
 	}
 	v, _, err := s.Get[string]("b")
@@ -184,13 +200,14 @@ func TestUpdateDeleteClearAndNoOp(t *testing.T) {
 }
 
 func TestCapacityAndInvalidKeysDoNotDamageData(t *testing.T) {
+	t.Parallel()
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
 	// Four count bytes + six record bytes + one key byte = 11 bytes.
 	value := bytes.Repeat([]byte{42}, 4096-headerSize-11)
-	must(t, s.SetBytes("k", value))
+	must(t, s.setBytes("k", value))
 	n := f.mutations
-	if err := s.SetBytes("k", append(value, 1)); err != ErrFull {
+	if err := s.setBytes("k", append(value, 1)); err != ErrFull {
 		t.Fatal(err)
 	}
 	if err := s.Set[string]("extra", "x"); err != ErrFull {
@@ -200,7 +217,7 @@ func TestCapacityAndInvalidKeysDoNotDamageData(t *testing.T) {
 		if err := s.Set[string](key, "x"); err != ErrInvalidKey {
 			t.Fatal(err)
 		}
-		if _, _, err := s.GetBytes(key); err != ErrInvalidKey {
+		if _, _, err := s.getBytes(key); err != ErrInvalidKey {
 			t.Fatal(err)
 		}
 		if err := s.Delete(key); err != ErrInvalidKey {
@@ -211,7 +228,7 @@ func TestCapacityAndInvalidKeysDoNotDamageData(t *testing.T) {
 		t.Fatal("invalid mutation erased flash")
 	}
 	s = openTest(t, f, 0, DefaultSize)
-	got, _, err := s.GetBytes("k")
+	got, _, err := s.getBytes("k")
 	must(t, err)
 	if !bytes.Equal(got, value) {
 		t.Fatal("full store lost value")
@@ -221,6 +238,7 @@ func TestCapacityAndInvalidKeysDoNotDamageData(t *testing.T) {
 }
 
 func TestRegionAndLargerBanks(t *testing.T) {
+	t.Parallel()
 	f := newFlash(6)
 	copy(f.data[:4096], bytes.Repeat([]byte{0x55}, 4096))
 	copy(f.data[5*4096:], bytes.Repeat([]byte{0xaa}, 4096))
@@ -228,10 +246,10 @@ func TestRegionAndLargerBanks(t *testing.T) {
 	value := bytes.Repeat([]byte{123}, 7000)
 	for i := 0; i < 8; i++ {
 		value[0] = byte(i)
-		must(t, s.SetBytes("large", value))
+		must(t, s.setBytes("large", value))
 	}
 	s = openTest(t, f, 4096, 4*4096)
-	got, _, err := s.GetBytes("large")
+	got, _, err := s.getBytes("large")
 	must(t, err)
 	if !bytes.Equal(got, value) {
 		t.Fatal("large value changed")
@@ -250,6 +268,7 @@ func TestRegionAndLargerBanks(t *testing.T) {
 }
 
 func TestCorruptionRecoveryAndExplicitFormat(t *testing.T) {
+	t.Parallel()
 	for _, damage := range []int{0, 12, 16, 24, 28, headerSize + 10} {
 		t.Run(fmt.Sprint(damage), func(t *testing.T) {
 			f := newFlash(4)
@@ -293,13 +312,14 @@ func TestCorruptionRecoveryAndExplicitFormat(t *testing.T) {
 }
 
 func TestFirstUseOfUnformattedRegion(t *testing.T) {
+	t.Parallel()
 	for _, fill := range []byte{0xff, 0x00, 0x55, 0xfe} {
 		t.Run(fmt.Sprintf("fill_%02x", fill), func(t *testing.T) {
 			f := newFlash(4)
 			copy(f.data[4096:12288], bytes.Repeat([]byte{fill}, 8192))
 			before := bytes.Clone(f.data)
 			s := openTest(t, f, 4096, DefaultSize)
-			if _, found, err := s.GetBytes("key"); err != nil || found {
+			if _, found, err := s.getBytes("key"); err != nil || found {
 				t.Fatalf("found=%v, err=%v", found, err)
 			}
 			if f.mutations != 0 {
@@ -321,7 +341,7 @@ func TestFirstUseOfUnformattedRegion(t *testing.T) {
 			}
 			must(t, s.Delete("key"))
 			s = openTest(t, f, 4096, DefaultSize)
-			if _, found, err := s.GetBytes("key"); err != nil || found {
+			if _, found, err := s.getBytes("key"); err != nil || found {
 				t.Fatalf("found=%v, err=%v", found, err)
 			}
 			if !bytes.Equal(f.data[:4096], before[:4096]) || !bytes.Equal(f.data[12288:], before[12288:]) {
@@ -332,6 +352,7 @@ func TestFirstUseOfUnformattedRegion(t *testing.T) {
 }
 
 func TestDamagedCommittedSnapshotIsNotFirstUse(t *testing.T) {
+	t.Parallel()
 	for _, damage := range []int{0, 24, commitOffset, headerSize + 10} {
 		t.Run(fmt.Sprint(damage), func(t *testing.T) {
 			f := newFlash(2)
@@ -351,6 +372,7 @@ func TestDamagedCommittedSnapshotIsNotFirstUse(t *testing.T) {
 }
 
 func TestUnsupportedVersionNeverAutoFormats(t *testing.T) {
+	t.Parallel()
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
 	must(t, s.Set[string]("key", "x"))
@@ -365,20 +387,8 @@ func TestUnsupportedVersionNeverAutoFormats(t *testing.T) {
 	}
 }
 
-func snapshot(t *testing.T, s *Store) map[string]string {
-	t.Helper()
-	keys, err := s.Keys()
-	must(t, err)
-	result := make(map[string]string)
-	for _, k := range keys {
-		v, _, err := s.Get[string](k)
-		must(t, err)
-		result[k] = v
-	}
-	return result
-}
-
 func TestPowerLossDuringEveryMutation(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"first", "first-unformatted", "update", "delete", "clear"} {
 		t.Run(scenario, func(t *testing.T) {
 			base := newFlash(2)
@@ -417,7 +427,7 @@ func TestPowerLossDuringEveryMutation(t *testing.T) {
 						if err := action(handle); !errors.Is(err, errPowerLoss) {
 							t.Fatal(err)
 						}
-						if _, _, err := handle.GetBytes("value"); err != ErrNeedsReopen {
+						if _, _, err := handle.getBytes("value"); err != ErrNeedsReopen {
 							t.Fatal(err)
 						}
 						if err := handle.Set[string]("other", "x"); err != ErrNeedsReopen {
@@ -461,6 +471,7 @@ func (f *verifyFailureFlash) WriteAt(b []byte, off int64) (int, error) {
 }
 
 func TestVerificationFailureRequiresReopen(t *testing.T) {
+	t.Parallel()
 	f := &verifyFailureFlash{memoryFlash: newFlash(2)}
 	s := openTest(t, f, 0, DefaultSize)
 	must(t, s.Set[string]("key", "old"))
@@ -468,7 +479,7 @@ func TestVerificationFailureRequiresReopen(t *testing.T) {
 	if err := s.Set[string]("key", "new"); err != io.ErrUnexpectedEOF {
 		t.Fatal(err)
 	}
-	if _, _, err := s.GetBytes("key"); err != ErrNeedsReopen {
+	if _, _, err := s.getBytes("key"); err != ErrNeedsReopen {
 		t.Fatal(err)
 	}
 	f.fail, f.failVerify = false, false
@@ -481,6 +492,7 @@ func TestVerificationFailureRequiresReopen(t *testing.T) {
 }
 
 func TestConcurrentUse(t *testing.T) {
+	t.Parallel()
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
 	var wg sync.WaitGroup
@@ -494,7 +506,7 @@ func TestConcurrentUse(t *testing.T) {
 					t.Error(err)
 					return
 				}
-				if _, _, err := s.GetBytes(key); err != nil {
+				if _, _, err := s.getBytes(key); err != nil {
 					t.Error(err)
 					return
 				}
@@ -513,18 +525,19 @@ func TestConcurrentUse(t *testing.T) {
 }
 
 func TestGetterFoundAndErrors(t *testing.T) {
+	t.Parallel()
 	f := newFlash(2)
 	s := openTest(t, f, 0, DefaultSize)
-	if v, found, err := s.GetBytes("missing"); v != nil || found || err != nil {
+	if v, found, err := s.getBytes("missing"); v != nil || found || err != nil {
 		t.Fatalf("%v %v %v", v, found, err)
 	}
 	if v, found, err := s.Get[string]("missing"); v != "" || found || err != nil {
 		t.Fatalf("%q %v %v", v, found, err)
 	}
-	must(t, s.SetBytes("empty", nil))
+	must(t, s.setBytes("empty", nil))
 	must(t, s.Set[string]("name", "ESP32"))
 	s = openTest(t, f, 0, DefaultSize)
-	if v, found, err := s.GetBytes("empty"); len(v) != 0 || !found || err != nil {
+	if v, found, err := s.getBytes("empty"); len(v) != 0 || !found || err != nil {
 		t.Fatalf("%v %v %v", v, found, err)
 	}
 	if v, found, err := s.Get[string]("empty"); v != "" || !found || err != nil {
@@ -533,7 +546,7 @@ func TestGetterFoundAndErrors(t *testing.T) {
 	if v, found, err := s.Get[string]("name"); v != "ESP32" || !found || err != nil {
 		t.Fatalf("%q %v %v", v, found, err)
 	}
-	if v, found, err := s.GetBytes(""); v != nil || found || err != ErrInvalidKey {
+	if v, found, err := s.getBytes(""); v != nil || found || err != ErrInvalidKey {
 		t.Fatalf("%v %v %v", v, found, err)
 	}
 	if v, found, err := s.Get[string](""); v != "" || found || err != ErrInvalidKey {
@@ -543,10 +556,196 @@ func TestGetterFoundAndErrors(t *testing.T) {
 	if err := s.Set[string]("name", "new"); err != errPowerLoss {
 		t.Fatal(err)
 	}
-	if v, found, err := s.GetBytes("name"); v != nil || found || err != ErrNeedsReopen {
+	if v, found, err := s.getBytes("name"); v != nil || found || err != ErrNeedsReopen {
 		t.Fatalf("%v %v %v", v, found, err)
 	}
 	if v, found, err := s.Get[string]("name"); v != "" || found || err != ErrNeedsReopen {
 		t.Fatalf("%q %v %v", v, found, err)
+	}
+}
+
+
+type timeout int64
+type names []string
+
+func typedRoundTrip[T Value](t *testing.T, value T) {
+	t.Helper()
+	f := newFlash(2)
+	s := openTest(t, f, 0, DefaultSize)
+	must(t, s.Set[T]("value", value))
+	writes := f.mutations
+	must(t, s.Set[T]("value", value))
+	if f.mutations != writes {
+		t.Fatal("same typed value rewrote flash")
+	}
+	s = openTest(t, f, 0, DefaultSize)
+	got, found, err := s.Get[T]("value")
+	must(t, err)
+	if !found || !reflect.DeepEqual(got, value) {
+		t.Fatalf("got %#v, found %v; want %#v", got, found, value)
+	}
+	var zero T
+	got, found, err = s.Get[T]("absent")
+	if err != nil || found || !reflect.DeepEqual(got, zero) {
+		t.Fatalf("missing: %#v %v %v", got, found, err)
+	}
+}
+
+func TestTypedScalarsAndSlices(t *testing.T) {
+	t.Parallel()
+	typedRoundTrip(t, "строка")
+	typedRoundTrip(t, "")
+	typedRoundTrip(t, true)
+	typedRoundTrip(t, false)
+	typedRoundTrip(t, int(-123))
+	typedRoundTrip(t, int8(math.MinInt8))
+	typedRoundTrip(t, int16(math.MinInt16))
+	typedRoundTrip(t, int32(math.MinInt32))
+	typedRoundTrip(t, int64(math.MinInt64))
+	typedRoundTrip(t, uint(123))
+	typedRoundTrip(t, uint8(math.MaxUint8))
+	typedRoundTrip(t, uint16(math.MaxUint16))
+	typedRoundTrip(t, uint32(math.MaxUint32))
+	typedRoundTrip(t, uint64(math.MaxUint64))
+	typedRoundTrip(t, float32(math.MaxFloat32))
+	typedRoundTrip(t, float64(math.MaxFloat64))
+	typedRoundTrip(t, math.SmallestNonzeroFloat64)
+	typedRoundTrip(t, []bool{false, true})
+	typedRoundTrip(t, []string{"a", "", "б"})
+	typedRoundTrip(t, []int{-1, 0, 1})
+	typedRoundTrip(t, []int8{math.MinInt8, math.MaxInt8})
+	typedRoundTrip(t, []int16{math.MinInt16, math.MaxInt16})
+	typedRoundTrip(t, []int32{math.MinInt32, math.MaxInt32})
+	typedRoundTrip(t, []int64{math.MinInt64, math.MaxInt64})
+	typedRoundTrip(t, []uint{0, 123})
+	typedRoundTrip(t, []uint8{0, 255, 0})
+	typedRoundTrip(t, []uint16{0, math.MaxUint16})
+	typedRoundTrip(t, []uint32{0, math.MaxUint32})
+	typedRoundTrip(t, []uint64{0, math.MaxUint64})
+	typedRoundTrip(t, []float32{0.5, math.MaxFloat32})
+	typedRoundTrip(t, []float64{0.5, math.SmallestNonzeroFloat64})
+	typedRoundTrip(t, []string(nil))
+	typedRoundTrip(t, []string{})
+	typedRoundTrip(t, []byte(nil))
+	typedRoundTrip(t, []byte{})
+	typedRoundTrip(t, timeout(-100))
+	typedRoundTrip(t, names{"one", "two"})
+}
+
+func TestGenericMethodsShareStoreAndPreserveOtherKeys(t *testing.T) {
+	t.Parallel()
+	f := newFlash(2)
+	s := openTest(t, f, 0, DefaultSize)
+	must(t, s.Set[string]("name", "ESP32"))
+	must(t, s.Set[int]("count", 42))
+	must(t, s.Set[bool]("enabled", true))
+	input := []uint16{80, 443}
+	must(t, s.Set[[]uint16]("ports", input))
+	input[0] = 1
+	s = openTest(t, f, 0, DefaultSize)
+	name, found, err := s.Get[string]("name")
+	must(t, err)
+	if !found || name != "ESP32" {
+		t.Fatal(name, found)
+	}
+	count, found, err := s.Get[int]("count")
+	must(t, err)
+	if !found || count != 42 {
+		t.Fatal(count, found)
+	}
+	enabled, found, err := s.Get[bool]("enabled")
+	must(t, err)
+	if !found || !enabled {
+		t.Fatal(enabled, found)
+	}
+	ports, found, err := s.Get[[]uint16]("ports")
+	must(t, err)
+	if !found || !reflect.DeepEqual(ports, []uint16{80, 443}) {
+		t.Fatal(ports, found)
+	}
+	ports[0] = 1
+	ports, _, err = s.Get[[]uint16]("ports")
+	must(t, err)
+	if ports[0] != 80 {
+		t.Fatal("returned slice aliases stored value")
+	}
+	must(t, s.Set[int]("count", 43))
+	must(t, s.Delete("enabled"))
+	s = openTest(t, f, 0, DefaultSize)
+	count, found, err = s.Get[int]("count")
+	must(t, err)
+	if !found || count != 43 {
+		t.Fatal(count, found)
+	}
+	if _, found, err := s.Get[bool]("enabled"); found || err != nil {
+		t.Fatal(found, err)
+	}
+}
+
+func TestTypedErrorsDoNotModifyStorage(t *testing.T) {
+	t.Parallel()
+	f := newFlash(2)
+	s := openTest(t, f, 0, DefaultSize)
+	must(t, s.Set[int]("number", 42))
+	before := bytes.Clone(f.data)
+	if v, found, err := s.Get[string]("number"); v != "" || found || !errors.Is(err, ErrTypeMismatch) {
+		t.Fatal(v, found, err)
+	}
+	if err := s.Set[float64]("number", math.NaN()); err == nil {
+		t.Fatal("NaN must fail serialization")
+	}
+	if err := s.Set[float64]("number", math.Inf(1)); err == nil {
+		t.Fatal("infinity must fail serialization")
+	}
+	if !bytes.Equal(before, f.data) {
+		t.Fatal("type or serialization error modified flash")
+	}
+	if _, found, err := s.Get[int](""); found || err != ErrInvalidKey {
+		t.Fatal(found, err)
+	}
+	if err := s.Set[int]("", 1); err != ErrInvalidKey {
+		t.Fatal(err)
+	}
+	// A new type at an existing key must replace the tag too.
+	must(t, s.Set[bool]("number", false))
+	s = openTest(t, f, 0, DefaultSize)
+	if _, found, err := s.Get[int]("number"); found || err != ErrTypeMismatch {
+		t.Fatal(found, err)
+	}
+	if v, found, err := s.Get[bool]("number"); v || !found || err != nil {
+		t.Fatal(v, found, err)
+	}
+}
+
+func TestGenericLegacyValuesAndOverwrite(t *testing.T) {
+	t.Parallel()
+	f := newFlash(2)
+	s := openTest(t, f, 0, DefaultSize)
+	must(t, s.setBytes("old", []byte("saved before serialization")))
+	s = openTest(t, f, 0, DefaultSize)
+	v, found, err := s.Get[string]("old")
+	must(t, err)
+	if !found || v != "saved before serialization" {
+		t.Fatal(v, found)
+	}
+	b, found, err := s.Get[[]byte]("old")
+	must(t, err)
+	if !found || string(b) != v {
+		t.Fatal(b, found)
+	}
+	if _, found, err := s.Get[int]("old"); found || err != ErrTypeMismatch {
+		t.Fatal(found, err)
+	}
+	must(t, s.Set[string]("new", "helper"))
+	v, found, err = s.Get[string]("new")
+	must(t, err)
+	if !found || v != "helper" {
+		t.Fatal(v, found)
+	}
+	must(t, s.Set[string]("new", "typed"))
+	v, found, err = s.Get[string]("new")
+	must(t, err)
+	if !found || v != "typed" {
+		t.Fatal(v, found)
 	}
 }

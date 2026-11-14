@@ -6,45 +6,57 @@ import (
 	"time"
 
 	"github.com/Z00mZE/esperetools/kvstorage"
-	"github.com/google/uuid"
-	"github.com/pkg/errors"
 )
 
 func main() {
-	time.Sleep(time.Second)
-	tries := 10
-	// Give the USB serial monitor time to connect after reset.
-	for range tries {
-		if err := run(); err != nil {
-			println("kvstorage error:", err.Error())
-			continue
-		}
-
-		time.Sleep(time.Second)
+	time.Sleep(3 * time.Second)
+	if err := run(); err != nil {
+		println("kvstorage:", err.Error())
 	}
+	// deadlock
+	<-make(chan struct{})
 }
 
 func run() error {
-	for _, tag := range []string{"name", "face"} {
-		s, err := kvstorage.Open()
-		if err != nil {
-			return errors.Wrap(err, "kvstorage.Open")
-		}
-		// Read first. A later boot must not overwrite settings with defaults.
-		name, found, err := s.Get[string](tag)
-		if err != nil {
-			return errors.Wrap(err, "kvstorage.Get[string]")
-		}
-
-		n := tag + "//" + uuid.NewString()
-		println("tag", tag, "founded", found, "old", name, "new", n)
-		if err := s.Set[string](tag, n); err != nil {
-			return errors.Wrap(err, "kvstorage.Set[string]")
+	s, err := kvstorage.Open()
+	if err != nil {
+		return err
+	}
+	boots, _, err := s.Get[uint64]("boots")
+	if err != nil {
+		return err
+	}
+	if err := s.Set[uint64]("boots", boots+1); err != nil {
+		return err
+	}
+	name, found, err := s.Get[string]("name")
+	if err != nil {
+		return err
+	}
+	if !found {
+		name = "ESP32"
+		if err := s.Set[string]("name", name); err != nil {
+			return err
 		}
 	}
-	println("Saved name. Disconnect power, reconnect, and run the monitor.")
-
-	println()
-	println()
+	if err := s.Set[bool]("enabled", true); err != nil {
+		return err
+	}
+	if _, found, err := s.Get[[]uint16]("ports"); err != nil {
+		return err
+	} else if !found {
+		if err := s.Set[[]uint16]("ports", []uint16{80, 443}); err != nil {
+			return err
+		}
+	}
+	ports, _, err := s.Get[[]uint16]("ports")
+	if err != nil {
+		return err
+	}
+	enabled, _, err := s.Get[bool]("enabled")
+	if err != nil {
+		return err
+	}
+	println("name:", name, "boot:", boots+1, "enabled:", enabled, "ports:", len(ports))
 	return nil
 }
