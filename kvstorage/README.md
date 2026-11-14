@@ -13,28 +13,39 @@ if err != nil {
 	return err
 }
 
-// После успешного SetString значение уже находится во flash.
-if err := storage.SetString("ssid", "Home Wi-Fi"); err != nil {
+// Все представления используют один экземпляр storage и одну область flash.
+strings := kvstorage.Typed[string](storage)
+numbers := kvstorage.Typed[int](storage)
+flags := kvstorage.Typed[bool](storage)
+lists := kvstorage.Typed[[]uint16](storage)
+
+if err := strings.Set("ssid", "Home Wi-Fi"); err != nil {
 	return err
 }
+if err := numbers.Set("timeout_ms", 5000); err != nil { return err }
+if err := flags.Set("enabled", true); err != nil { return err }
+if err := lists.Set("ports", []uint16{80, 443}); err != nil { return err }
 
-// После выключения и включения платы снова вызовите Open и GetString.
-ssid, found, err := storage.GetString("ssid")
+// После выключения и включения платы снова вызовите Open и создайте Typed[T].
+ssid, found, err := strings.Get("ssid")
+timeout, found, err := numbers.Get("timeout_ms")
+ports, found, err := lists.Get("ports")
 ```
 
 Фрагмент предназначен для функции, возвращающей `error`. Полная программа:
-[`examples/basic/main.go`](examples/basic/main.go). Она записывает значение только
-при первом запуске и читает его при последующих включениях.
+[`examples/typed/main.go`](examples/typed/main.go). Она хранит строки, числа,
+булевы значения и слайсы в одной области. Счётчик запусков увеличивается при
+каждом старте; имя и список портов создаются при первом запуске.
 
 ```sh
 # Проверка сборки без прошивки платы
-GOFLAGS=-buildvcs=false tinygo build -target=esp32s3-generic -serial=usb -o kvstorage.elf ./kvstorage/examples/basic
+GOFLAGS=-buildvcs=false tinygo build -target=esp32s3-generic -serial=usb -o kvstorage.elf ./kvstorage/examples/typed
 
 # Прошивка примера и запуск монитора
-GOFLAGS=-buildvcs=false tinygo flash -monitor -target=esp32s3-generic -serial=usb -port=COM6 ./kvstorage/examples/basic
+GOFLAGS=-buildvcs=false tinygo flash -monitor -target=esp32s3-generic -serial=usb -port=COM6 ./kvstorage/examples/typed
 ```
 
-После первого сообщения `Saved name` завершите монитор через Ctrl+C, отключите
+После сообщения `name: ESP32 boot: 1 ...` завершите монитор через Ctrl+C, отключите
 питание платы и подключите её снова. **Повторно прошивать не нужно.** Откройте
 монитор:
 
@@ -42,8 +53,8 @@ GOFLAGS=-buildvcs=false tinygo flash -monitor -target=esp32s3-generic -serial=us
 tinygo monitor -target=esp32s3-generic -serial=usb -port=COM6
 ```
 
-Сообщение `Loaded from flash: ESP32` означает, что программа прочитала сохранённое
-значение. Если сообщение было выведено до подключения монитора, нажмите Reset при
+При следующем запуске счётчик увеличится, а сохранённые значения будут прочитаны
+из flash. Если сообщение было выведено до подключения монитора, нажмите Reset при
 открытом мониторе. Замените `COM6` на порт своей платы. Синтаксис `GOFLAGS=...`
 в командах выше предназначен для Bash/UCRT64.
 
@@ -52,25 +63,40 @@ tinygo monitor -target=esp32s3-generic -serial=usb -port=COM6
 | Метод | Назначение |
 | --- | --- |
 | `Open() (*Store, error)` | Открыть стандартную область flash на ESP32-C3/S3 |
-| `Set(key string, value []byte) error` | Сохранить байтовое значение |
-| `Get(key string) ([]byte, bool, error)` | Прочитать копию значения и признак наличия |
-| `SetString(key, value string) error` | Сохранить строку |
-| `GetString(key string) (string, bool, error)` | Прочитать строку и признак наличия |
+| `Typed[T Value](storage *Store) TypedStore[T]` | Создать типизированное представление общего хранилища |
+| `TypedStore[T].Set(key string, value T) error` | Сериализовать и сохранить значение |
+| `TypedStore[T].Get(key string) (T, bool, error)` | Прочитать значение нужного типа и признак наличия |
 | `Delete(key string) error` | Сохранить удаление ключа |
 | `Has(key string) (bool, error)` | Проверить наличие ключа |
 | `Keys() ([]string, error)` | Получить ключи по алфавиту |
 | `Clear() error` | Сохранить удаление всех ключей |
 
 Ключи чувствительны к регистру и содержат от 1 до 255 байт; Unicode допустим.
-Значения — произвольные байты, в том числе пустой массив. Для отсутствующего ключа
-геттер возвращает нулевое значение, `found=false`, `err=nil`. Для существующего
-ключа с пустым значением возвращается `found=true`. `error` сообщает о настоящей
-ошибке. `Delete` отсутствующего ключа возвращает `ErrNotFound`.
-`GetString` интерпретирует сохранённые байты как строку;
-отдельные типы значений в хранилище не задаются.
+Допустимые скалярные типы: `string`, `bool`, все варианты `int`/`uint` от 8 до
+64 бит и `float32`/`float64`. Также поддерживаются слайсы этих встроенных типов,
+включая `[]byte`, и именованные типы с соответствующим базовым типом.
+Указатели, структуры, map, complex, uintptr и вложенные слайсы не входят в `Value`.
 
-Числа и структуры можно кодировать через `encoding/binary` или `encoding/json`
-в вызывающем коде, затем передавать в `Set`.
+В Go параметр типа объявляется у типа-получателя, а не у отдельного метода.
+Поэтому `TypedStore[T]` предоставляет методы `Set` и `Get` с параметром `T`.
+Представление не открывает flash повторно и не копирует хранилище.
+
+Сериализация выполняется внутри компонента через JSON. Вместе со значением
+сохраняются версия сериализации и код типа. Чтение с другим типом возвращает
+`ErrTypeMismatch`; числа не преобразуются через `float64`, поэтому `int64` и
+`uint64` сохраняются точно, включая предельные значения. `NaN` и бесконечности
+возвращают ошибку сериализации, не изменяя flash.
+
+Для отсутствующего ключа геттер возвращает нулевое значение, `found=false`,
+`err=nil`. Пустое значение и `nil`-слайс — существующие записи с `found=true`.
+При ошибке возвращается нулевое значение, `found=false`, `err!=nil`.
+`Delete` отсутствующего ключа возвращает `ErrNotFound`.
+
+Низкоуровневые `Store.Set/Get` по-прежнему работают с сырыми `[]byte`.
+`SetString/GetString` оставлены как сокращение для `Typed[string]`.
+Старые строки и байтовые значения без сериализации читаются через представления
+`Typed[string]` и `Typed[[]byte]`; их прежний числовой тип определить невозможно.
+Новая разметка flash и стирание старого хранилища для перехода не требуются.
 
 `Set`, `Delete` и `Clear` сохраняют результат сразу: отдельного `Commit` или
 `Close` нет. Повторный `Set` с тем же значением не записывает flash. Методы одного
@@ -94,13 +120,15 @@ TinyGo 0.44.0 для ESP32-C3/S3 конец этой области соотве
 же ключу заменяет значение, а `Delete` сохраняет удаление.
 
 Два банка по 4 КиБ дают примерно **4 КиБ полезных данных**, включая ключи
-и служебные поля; при переполнении возвращается `ErrFull`, прежние данные остаются.
+и служебные поля сериализации; при переполнении возвращается `ErrFull`, прежние
+данные остаются. Размер JSON, а не размер исходного Go-значения, определяет расход
+flash; например, `[]byte` кодируется в JSON как строка base64.
 
 Для другой области или большего объёма:
 
 ```go
 // offset — относительно переданного flash, size — весь размер обоих банков.
-storage, err := kvstorage.New(flash, offset, size)
+storage, err := kvstorage.NewStore(flash, offset, size)
 ```
 
 `flash` реализует интерфейс [`Flash`](kvstorage.go); на поддерживаемых платах

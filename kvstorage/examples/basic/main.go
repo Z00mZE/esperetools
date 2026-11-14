@@ -30,15 +30,16 @@ func run() error {
 		if err != nil {
 			return errors.Wrap(err, "kvstorage.Open")
 		}
+		strings := kvstorage.Typed[string](s)
 		// Read first. A later boot must not overwrite settings with defaults.
-		name, found, err := s.GetString(tag)
+		name, found, err := strings.Get(tag)
 		if err != nil {
 			return errors.Wrap(err, "kvstorage.GetString")
 		}
 
 		n := tag + "//" + uuid.NewString()
 		println("tag", tag, "founded", found, "old", name, "new", n)
-		if err := s.SetString(tag, n); err != nil {
+		if err := strings.Set(tag, n); err != nil {
 			return errors.Wrap(err, "kvstorage.SetString")
 		}
 	}
