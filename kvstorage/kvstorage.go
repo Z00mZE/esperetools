@@ -7,11 +7,13 @@ package kvstorage
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"hash/crc32"
 	"io"
 	"sort"
 	"sync"
+	"reflect"
 )
 
 const (
@@ -22,9 +24,31 @@ const (
 	commitOffset         = 32
 	commitMarker  uint32 = 0x4b564f4b
 	formatVersion uint32 = 1
+
+	corrupt bankState = iota
+	uninitialized
+	valid
+
+	kindBool byte = iota + 1
+	kindString
+	kindInt
+	kindInt8
+	kindInt16
+	kindInt32
+	kindInt64
+	kindUint
+	kindUint8
+	kindUint16
+	kindUint32
+	kindUint64
+	kindFloat32
+	kindFloat64
+	kindSlice byte = 0x80
 )
 
-var signature = [8]byte{'K', 'V', 'S', 'T', 'O', 'R', 'E', '1'}
+var (
+	signature = [8]byte{'K', 'V', 'S', 'T', 'O', 'R', 'E', '1'}
+)
 
 var (
 	ErrNotFound     = errors.New("kvstorage: key not found")
@@ -39,6 +63,49 @@ var (
 	ErrNeedsReopen        = errors.New("kvstorage: reopen after failed flash operation")
 	ErrGenerationOverflow = errors.New("kvstorage: generation counter exhausted")
 )
+
+// The envelope lives inside the existing byte-value format, so old snapshots
+// remain readable. The last byte is the serialization version; the next byte
+// is a stable scalar type code, with bit 7 set for slices.
+var valueMagic = [8]byte{0, 'K', 'V', 'J', 'S', 'O', 'N', 1}
+
+var scalarKinds = [...]byte{
+	reflect.Bool:    kindBool,
+	reflect.String:  kindString,
+	reflect.Int:     kindInt,
+	reflect.Int8:    kindInt8,
+	reflect.Int16:   kindInt16,
+	reflect.Int32:   kindInt32,
+	reflect.Int64:   kindInt64,
+	reflect.Uint:    kindUint,
+	reflect.Uint8:   kindUint8,
+	reflect.Uint16:  kindUint16,
+	reflect.Uint32:  kindUint32,
+	reflect.Uint64:  kindUint64,
+	reflect.Float32: kindFloat32,
+	reflect.Float64: kindFloat64,
+}
+
+
+type bankState byte
+
+type bank struct {
+	index      int
+	state      bankState
+	generation uint64
+	payload    []byte
+	values     map[string][]byte
+}
+
+// Value supports scalars and slices of built-in scalar types. byte and rune
+// are aliases of uint8 and int32. Nested slices, pointers and structs are excluded.
+type Value interface {
+	~bool | ~string | ~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint |
+		~uint8 | ~uint16 | ~uint32 | ~uint64 | ~float32 | ~float64 | ~[]bool |
+		~[]string | ~[]int | ~[]int8 | ~[]int16 | ~[]int32 | ~[]int64 | ~[]uint |
+		~[]uint8 | ~[]uint16 | ~[]uint32 | ~[]uint64 | ~[]float32 | ~[]float64
+}
+
 
 // Flash is implemented by machine.Flash on ESP32-C3/S3 in TinyGo 0.44.
 // Offsets are bytes; EraseBlocks arguments are block indexes and counts.
@@ -72,14 +139,8 @@ type Store struct {
 // The first Set initializes it. Existing corrupt snapshots are not formatted.
 // Reopen with the same physical region after reset to recover stored values.
 func NewStore(f Flash, offset, size int64) (*Store, error) {
-	if f == nil {
-		return nil, ErrInvalidFlash
-	}
-	erase, write := f.EraseBlockSize(), f.WriteBlockSize()
-	if erase < 4096 || erase%4 != 0 || (write != 1 && write != 2 && write != 4) ||
-		offset < 0 || size/2 < erase || offset%erase != 0 || size%2 != 0 || (size/2)%erase != 0 ||
-		offset > f.Size() || size > f.Size()-offset || uint64(size/2) > uint64(^uint32(0)) || uint64(size/2) > uint64(^uint(0)>>1) {
-		return nil, ErrInvalidFlash
+	if err := validateFlash(f, offset, size); err != nil {
+		return nil, err
 	}
 
 	s := &Store{flash: f, offset: offset, bankSize: size / 2, active: -1, values: make(map[string][]byte)}
@@ -92,10 +153,8 @@ func NewStore(f Flash, offset, size int64) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if a.state == valid && b.state == valid && a.generation == b.generation {
-		if !bytes.Equal(a.payload, b.payload) {
-			return nil, ErrCorrupt
-		}
+	if a.state == valid && b.state == valid && a.generation == b.generation && !bytes.Equal(a.payload, b.payload) {
+		return nil, ErrCorrupt
 	}
 	chosen := a
 	if b.state == valid && (a.state != valid || b.generation > a.generation) {
@@ -108,88 +167,154 @@ func NewStore(f Flash, offset, size int64) (*Store, error) {
 	// A reserved region need not have been erased by the firmware flasher.
 	// Without signs of a committed kvstorage snapshot, this is first use:
 	// opening is read-only, and the first Set initializes an inactive bank.
-	if canInitialize(a.state) && canInitialize(b.state) {
+	if a.state == uninitialized && b.state == uninitialized {
 		return s, nil
 	}
 	return nil, ErrCorrupt
 }
 
-func newStore(f Flash, offset, size int64) (*Store, error) {
+func validateFlash(f Flash, offset, size int64) error {
 	if f == nil {
-		return nil, ErrInvalidFlash
+		return ErrInvalidFlash
 	}
 	erase, write := f.EraseBlockSize(), f.WriteBlockSize()
 	if erase < 4096 || erase%4 != 0 || (write != 1 && write != 2 && write != 4) ||
 		offset < 0 || size/2 < erase || offset%erase != 0 || size%2 != 0 || (size/2)%erase != 0 ||
 		offset > f.Size() || size > f.Size()-offset || uint64(size/2) > uint64(^uint32(0)) || uint64(size/2) > uint64(^uint(0)>>1) {
-		return nil, ErrInvalidFlash
+		return ErrInvalidFlash
 	}
-	return &Store{flash: f, offset: offset, bankSize: size / 2, active: -1, values: make(map[string][]byte)}, nil
+	return nil
 }
 
 // Format explicitly erases ONLY the specified region and opens an empty store.
 // All keys in that region are lost. Normal opening and writes never call Format.
 func Format(f Flash, offset, size int64) (*Store, error) {
-	s, err := newStore(f, offset, size)
-	if err != nil {
+	if err := validateFlash(f, offset, size); err != nil {
 		return nil, err
 	}
 	if err := f.EraseBlocks(offset/f.EraseBlockSize(), size/f.EraseBlockSize()); err != nil {
 		return nil, err
 	}
-	return NewStore(s.flash, offset, size)
+	return NewStore(f, offset, size)
 }
 
-type bankState byte
-
-const (
-	corrupt bankState = iota
-	blank
-	uninitialized
-	pending
-	valid
-)
-
-func canInitialize(state bankState) bool {
-	return state == blank || state == uninitialized || state == pending
-}
-
-type bank struct {
-	index      int
-	state      bankState
-	generation uint64
-	payload    []byte
-	values     map[string][]byte
-}
-
-func readFull(f Flash, b []byte, off int64) error {
-	n, err := f.ReadAt(b, off)
+// Set serializes and persists a typed value. It does not modify storage if
+// serialization fails. Changing the type stored at an existing key is allowed.
+func (s *Store) Set[T Value](key string, value T) error {
+	if !validKey(key) {
+		return ErrInvalidKey
+	}
+	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	if n != len(b) {
-		return io.ErrUnexpectedEOF
-	}
-	return nil
+	b := make([]byte, len(valueMagic)+1+len(data))
+	copy(b, valueMagic[:])
+	b[len(valueMagic)] = valueKind[T]()
+	copy(b[len(valueMagic)+1:], data)
+	return s.setBytes(key, b)
 }
 
-func allErased(b []byte) bool {
-	for _, v := range b {
-		if v != 255 {
-			return false
+// Get returns the typed value, its presence, and an error. A missing key
+// returns the zero value, false, nil. On an error it returns zero, false, err.
+// A different stored scalar type (including slice element type) returns
+// ErrTypeMismatch rather than silently converting or losing numeric precision.
+func (s *Store) Get[T Value](key string) (T, bool, error) {
+	var value T
+	b, found, err := s.getBytes(key)
+	if err != nil || !found {
+		return value, false, err
+	}
+	if len(b) >= len(valueMagic) && bytes.Equal(b[:len(valueMagic)-1], valueMagic[:len(valueMagic)-1]) {
+		if b[len(valueMagic)-1] != valueMagic[len(valueMagic)-1] {
+			return value, false, ErrUnsupported
+		}
+		if len(b) < len(valueMagic)+1 {
+			return value, false, ErrCorrupt
+		}
+		if b[len(valueMagic)] != valueKind[T]() {
+			return value, false, ErrTypeMismatch
+		}
+		b = b[len(valueMagic)+1:]
+	} else {
+		// Earlier snapshots have untyped bytes. Preserve string and []byte
+		// reads, but do not guess a numeric or boolean type.
+		switch valueKind[T]() {
+		case kindString:
+			b, err = json.Marshal(string(b))
+		case kindSlice | kindUint8:
+			b, err = json.Marshal(b)
+		default:
+			return value, false, ErrTypeMismatch
+		}
+		if err != nil {
+			return value, false, err
 		}
 	}
-	return true
+	if err := json.Unmarshal(b, &value); err != nil {
+		var zero T
+		return zero, false, err
+	}
+	return value, true, nil
 }
 
-// Header programming is the first write to an erased bank. A prefix of its
-// signature is enough to recognize an interrupted first header write.
-func partialSignature(b []byte) bool {
-	written := 0
-	for written < len(signature) && b[written] == signature[written] {
-		written++
+// Delete persists removal of a key. A missing key returns ErrNotFound.
+func (s *Store) Delete(key string) error {
+	if !validKey(key) {
+		return ErrInvalidKey
 	}
-	return written > 0 && allErased(b[written:len(signature)])
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fault {
+		return ErrNeedsReopen
+	}
+	if _, ok := s.values[key]; !ok {
+		return ErrNotFound
+	}
+	values := s.copyValues()
+	delete(values, key)
+	return s.commit(values)
+}
+
+func (s *Store) Has(key string) (bool, error) {
+	if !validKey(key) {
+		return false, ErrInvalidKey
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fault {
+		return false, ErrNeedsReopen
+	}
+	_, ok := s.values[key]
+	return ok, nil
+}
+
+// Keys returns a sorted snapshot of the keys.
+func (s *Store) Keys() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fault {
+		return nil, ErrNeedsReopen
+	}
+	keys := make([]string, 0, len(s.values))
+	for k := range s.values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// Clear persists an empty store, retaining the same power-loss guarantees as Set.
+func (s *Store) Clear() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fault {
+		return ErrNeedsReopen
+	}
+	if len(s.values) == 0 {
+		return nil
+	}
+	return s.commit(make(map[string][]byte))
 }
 
 func (s *Store) readBank(index int) (bank, error) {
@@ -197,10 +322,6 @@ func (s *Store) readBank(index int) (bank, error) {
 	b := make([]byte, int(s.bankSize))
 	if err := readFull(s.flash, b, s.offset+int64(index)*s.bankSize); err != nil {
 		return r, err
-	}
-	if allErased(b) {
-		r.state = blank
-		return r, nil
 	}
 	marker := binary.LittleEndian.Uint32(b[commitOffset:])
 	ownHeader := partialSignature(b)
@@ -212,7 +333,7 @@ func (s *Store) readBank(index int) (bank, error) {
 		// An interrupted NOR write can only leave some intended zero bits
 		// as ones. Cleared bits which belong to the marker indicate damage.
 		if ownHeader && marker&commitMarker == commitMarker {
-			r.state = pending
+			r.state = uninitialized
 		}
 		return r, nil
 	}
@@ -231,69 +352,12 @@ func (s *Store) readBank(index int) (bank, error) {
 	if crc32.ChecksumIEEE(r.payload) != binary.LittleEndian.Uint32(b[24:]) {
 		return r, nil
 	}
-	values, err := decode(r.payload)
+	values, err := decodeSnapshot(r.payload)
 	if err != nil {
 		return r, nil
 	}
 	r.state, r.values = valid, values
 	return r, nil
-}
-
-func decode(b []byte) (map[string][]byte, error) {
-	if len(b) < 4 {
-		return nil, ErrCorrupt
-	}
-	count := uint64(binary.LittleEndian.Uint32(b))
-	b = b[4:]
-	if count > uint64(len(b)/7) {
-		return nil, ErrCorrupt
-	}
-	values := make(map[string][]byte, int(count))
-	for i := uint64(0); i < count; i++ {
-		if len(b) < 6 {
-			return nil, ErrCorrupt
-		}
-		keyLen, valueLen := int(binary.LittleEndian.Uint16(b)), uint64(binary.LittleEndian.Uint32(b[2:]))
-		b = b[6:]
-		if keyLen < 1 || keyLen > MaxKeySize || uint64(keyLen)+valueLen > uint64(len(b)) {
-			return nil, ErrCorrupt
-		}
-		key := string(b[:keyLen])
-		if _, exists := values[key]; exists {
-			return nil, ErrCorrupt
-		}
-		values[key] = append([]byte{}, b[keyLen:keyLen+int(valueLen)]...)
-		b = b[keyLen+int(valueLen):]
-	}
-	if len(b) != 0 {
-		return nil, ErrCorrupt
-	}
-	return values, nil
-}
-
-func encode(values map[string][]byte, limit int64) ([]byte, error) {
-	length := int64(4)
-	keys := make([]string, 0, len(values))
-	for k, v := range values {
-		length += 6 + int64(len(k)) + int64(len(v))
-		if length > limit {
-			return nil, ErrFull
-		}
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	b := make([]byte, int(length))
-	binary.LittleEndian.PutUint32(b, uint32(len(keys)))
-	pos := 4
-	for _, k := range keys {
-		v := values[k]
-		binary.LittleEndian.PutUint16(b[pos:], uint16(len(k)))
-		binary.LittleEndian.PutUint32(b[pos+2:], uint32(len(v)))
-		pos += 6
-		pos += copy(b[pos:], k)
-		pos += copy(b[pos:], v)
-	}
-	return b, nil
 }
 
 func (s *Store) write(b []byte, off int64) error {
@@ -305,7 +369,7 @@ func (s *Store) write(b []byte, off int64) error {
 }
 
 func (s *Store) commit(values map[string][]byte) (err error) {
-	payload, err := encode(values, s.bankSize-headerSize)
+	payload, err := encodeSnapshot(values, s.bankSize-headerSize)
 	if err != nil {
 		return err
 	}
@@ -365,12 +429,8 @@ func (s *Store) commit(values map[string][]byte) (err error) {
 	return nil
 }
 
-func validKey(key string) bool { return len(key) > 0 && len(key) <= MaxKeySize }
-
-// SetBytes persists raw bytes before returning. For serialized values of
-// supported types, use Set[T]. Keys are case-sensitive, 1..255 bytes.
-// The caller can reuse value after Set returns. Identical writes are skipped.
-func (s *Store) SetBytes(key string, value []byte) error {
+// setBytes persists the serialized value. The caller retains its buffer.
+func (s *Store) setBytes(key string, value []byte) error {
 	if !validKey(key) {
 		return ErrInvalidKey
 	}
@@ -386,17 +446,12 @@ func (s *Store) SetBytes(key string, value []byte) error {
 	if old, ok := s.values[key]; ok && bytes.Equal(old, value) {
 		return nil
 	}
-	values := make(map[string][]byte, len(s.values)+1)
-	for k, v := range s.values {
-		values[k] = v
-	}
+	values := s.copyValues()
 	values[key] = append([]byte{}, value...)
 	return s.commit(values)
 }
 
-// GetBytes returns raw bytes and whether the key exists. A missing key returns
-// nil, false, nil; a stored empty value returns an empty slice, true, nil.
-func (s *Store) GetBytes(key string) ([]byte, bool, error) {
+func (s *Store) getBytes(key string) ([]byte, bool, error) {
 	if !validKey(key) {
 		return nil, false, ErrInvalidKey
 	}
@@ -412,65 +467,112 @@ func (s *Store) GetBytes(key string) ([]byte, bool, error) {
 	return append([]byte{}, value...), true, nil
 }
 
-// Delete persists removal of a key. A missing key returns ErrNotFound.
-func (s *Store) Delete(key string) error {
-	if !validKey(key) {
-		return ErrInvalidKey
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.fault {
-		return ErrNeedsReopen
-	}
-	if _, ok := s.values[key]; !ok {
-		return ErrNotFound
-	}
-	values := make(map[string][]byte, len(s.values)-1)
+// copyValues is called while mu is held. Serialized values are immutable, so
+// copying the map is sufficient; each mutation supplies a new value buffer.
+func (s *Store) copyValues() map[string][]byte {
+	values := make(map[string][]byte, len(s.values))
 	for k, v := range s.values {
-		if k != key {
-			values[k] = v
+		values[k] = v
+	}
+	return values
+}
+
+func decodeSnapshot(b []byte) (map[string][]byte, error) {
+	if len(b) < 4 {
+		return nil, ErrCorrupt
+	}
+	count := uint64(binary.LittleEndian.Uint32(b))
+	b = b[4:]
+	if count > uint64(len(b)/7) {
+		return nil, ErrCorrupt
+	}
+	values := make(map[string][]byte, int(count))
+	for i := uint64(0); i < count; i++ {
+		if len(b) < 6 {
+			return nil, ErrCorrupt
 		}
+		keyLen, valueLen := int(binary.LittleEndian.Uint16(b)), uint64(binary.LittleEndian.Uint32(b[2:]))
+		b = b[6:]
+		if keyLen < 1 || keyLen > MaxKeySize || uint64(keyLen)+valueLen > uint64(len(b)) {
+			return nil, ErrCorrupt
+		}
+		key := string(b[:keyLen])
+		if _, exists := values[key]; exists {
+			return nil, ErrCorrupt
+		}
+		values[key] = append([]byte{}, b[keyLen:keyLen+int(valueLen)]...)
+		b = b[keyLen+int(valueLen):]
 	}
-	return s.commit(values)
+	if len(b) != 0 {
+		return nil, ErrCorrupt
+	}
+	return values, nil
 }
 
-func (s *Store) Has(key string) (bool, error) {
-	if !validKey(key) {
-		return false, ErrInvalidKey
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.fault {
-		return false, ErrNeedsReopen
-	}
-	_, ok := s.values[key]
-	return ok, nil
-}
-
-// Keys returns a sorted snapshot of the keys.
-func (s *Store) Keys() ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.fault {
-		return nil, ErrNeedsReopen
-	}
-	keys := make([]string, 0, len(s.values))
-	for k := range s.values {
+func encodeSnapshot(values map[string][]byte, limit int64) ([]byte, error) {
+	length := int64(4)
+	keys := make([]string, 0, len(values))
+	for k, v := range values {
+		length += 6 + int64(len(k)) + int64(len(v))
+		if length > limit {
+			return nil, ErrFull
+		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	return keys, nil
+	b := make([]byte, int(length))
+	binary.LittleEndian.PutUint32(b, uint32(len(keys)))
+	pos := 4
+	for _, k := range keys {
+		v := values[k]
+		binary.LittleEndian.PutUint16(b[pos:], uint16(len(k)))
+		binary.LittleEndian.PutUint32(b[pos+2:], uint32(len(v)))
+		pos += 6
+		pos += copy(b[pos:], k)
+		pos += copy(b[pos:], v)
+	}
+	return b, nil
 }
 
-// Clear persists an empty store, retaining the same power-loss guarantees as Set.
-func (s *Store) Clear() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.fault {
-		return ErrNeedsReopen
+func readFull(f Flash, b []byte, off int64) error {
+	n, err := f.ReadAt(b, off)
+	if err != nil {
+		return err
 	}
-	if len(s.values) == 0 {
-		return nil
+	if n != len(b) {
+		return io.ErrUnexpectedEOF
 	}
-	return s.commit(make(map[string][]byte))
+	return nil
+}
+
+func allErased(b []byte) bool {
+	for _, v := range b {
+		if v != 255 {
+			return false
+		}
+	}
+	return true
+}
+
+// Header programming is the first write to an erased bank. A prefix of its
+// signature is enough to recognize an interrupted first header write.
+func partialSignature(b []byte) bool {
+	written := 0
+	for written < len(signature) && b[written] == signature[written] {
+		written++
+	}
+	return written > 0 && allErased(b[written:len(signature)])
+}
+
+func validKey(key string) bool { return len(key) > 0 && len(key) <= MaxKeySize }
+
+// Use explicit codes instead of persisting Go's reflect.Kind numbers.
+func valueKind[T Value]() byte {
+	typ := reflect.TypeOf((*T)(nil)).Elem()
+	var flag byte
+	if typ.Kind() == reflect.Slice {
+		flag = kindSlice
+		typ = typ.Elem()
+	}
+	return flag | scalarKinds[typ.Kind()]
 }
