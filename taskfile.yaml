@@ -7,10 +7,10 @@ tasks:
       - task --list-all
   flash:
     cmds:
-      - tinygo flash -target=esp32s3-generic -serial=usb -port=COM6 ./kvstorage/examples/basic
+      - tinygo flash -target=esp32s3-generic -serial=usb -port=COM6 ./kvstorage/examples/typed
   flash-and-monitor:
     cmds:
-      - tinygo flash -monitor -target=esp32s3-generic -serial=usb -port=COM6 ./kvstorage/examples/basic
+      - tinygo flash -monitor -target=esp32s3-generic -serial=usb -port=COM6 ./kvstorage/examples/typed
   monitor:
     cmds:
       - tinygo monitor -target=esp32s3-generic -serial=usb -port=COM6

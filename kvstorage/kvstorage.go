@@ -28,6 +28,7 @@ var signature = [8]byte{'K', 'V', 'S', 'T', 'O', 'R', 'E', '1'}
 
 var (
 	ErrNotFound     = errors.New("kvstorage: key not found")
+	ErrTypeMismatch = errors.New("kvstorage: value has a different type")
 	ErrInvalidKey   = errors.New("kvstorage: key must contain 1..255 bytes")
 	ErrFull         = errors.New("kvstorage: data does not fit in a bank")
 	ErrInvalidFlash = errors.New("kvstorage: invalid flash region or block sizes")
@@ -366,7 +367,8 @@ func (s *Store) commit(values map[string][]byte) (err error) {
 
 func validKey(key string) bool { return len(key) > 0 && len(key) <= MaxKeySize }
 
-// Set persists value before returning. Keys are case-sensitive, 1..255 bytes.
+// Set persists raw bytes before returning. For serialized values of arbitrary
+// supported types, use Typed[T](s).Set. Keys are case-sensitive, 1..255 bytes.
 // The caller can reuse value after Set returns. Identical writes are skipped.
 func (s *Store) Set(key string, value []byte) error {
 	if !validKey(key) {
@@ -410,10 +412,12 @@ func (s *Store) Get(key string) ([]byte, bool, error) {
 	return append([]byte{}, value...), true, nil
 }
 
-func (s *Store) SetString(key, value string) error { return s.Set(key, []byte(value)) }
+// SetString is a shorthand for Typed[string](s).Set.
+func (s *Store) SetString(key, value string) error { return Typed[string](s).Set(key, value) }
+
+// GetString is a shorthand for Typed[string](s).Get.
 func (s *Store) GetString(key string) (string, bool, error) {
-	b, found, err := s.Get(key)
-	return string(b), found, err
+	return Typed[string](s).Get(key)
 }
 
 // Delete persists removal of a key. A missing key returns ErrNotFound.
